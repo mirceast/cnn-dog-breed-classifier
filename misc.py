@@ -60,6 +60,7 @@ def create_data(image_folder, transform_train, transform_test, batch_size = 64, 
     # Create the data loaders
     train_loader = torch.utils.data.DataLoader(data["train"], batch_size=batch_size, 
                                                num_workers=num_workers, shuffle=shuffle, pin_memory=True)
+    # If using the 5crop test time augmentation num_workers must be set to 0 otherwise we get an error. 
     if fivecrop:
         num_workers = 0
         batch_size = int(np.floor(batch_size/5))
@@ -67,8 +68,7 @@ def create_data(image_folder, transform_train, transform_test, batch_size = 64, 
                                                num_workers=0, shuffle=shuffle, pin_memory=True)
     test_loader = torch.utils.data.DataLoader(data["test"], batch_size=batch_size, 
                                               num_workers=0, shuffle=shuffle, pin_memory=True)
-    loaders = {"train" : train_loader, "valid" : valid_loader, "test" : test_loader}    
-    
+    loaders = {"train" : train_loader, "valid" : valid_loader, "test" : test_loader}        
     return data, loaders, n_classes
 
 def get_samples_per_class(data):
@@ -101,7 +101,7 @@ def train_epoch(model,train_loader,optimizer,criterion,device):
     train_loss = train_loss / len(train_loader.dataset)
     return model, train_loss
         
-def valid_epoch(model,valid_loader,criterion,device):
+def valid_epoch(model,valid_loader,criterion,device,fivecrop):
     ######################    
     # validate the model #
     ######################
@@ -111,38 +111,24 @@ def valid_epoch(model,valid_loader,criterion,device):
         for data, target in valid_loader:
             # move to GPU
             data, target = data.to(device), target.to(device)
-            ## update the average validation loss
-            output = model(data)
-            loss = criterion(output, target)
-            valid_loss += loss.item() * data.size(0)
-    valid_loss = valid_loss / len(valid_loader.dataset) 
-    return valid_loss
-
-def valid_epoch_fivecrop(model,valid_loader,criterion,device,mode="mean"):
-    ######################    
-    # validate the model #
-    ######################
-    valid_loss = 0.0
-    model.eval()
-    with torch.no_grad():
-        for data, target in valid_loader:
-            # move to GPU
-            data, target = data.to(device), target.to(device)
-            bs, ncrops, c, h, w = data.size()
-            ## update the average validation loss
-            output = model(data.view(-1, c, h, w)) # fuse batch size and ncrops
-            if mode == "mean":
+            # if we do test time augmentation with 5crop we'll have an extra dimension in our tensor
+            if fivecrop == "mean":
+                bs, ncrops, c, h, w = data.size()
+                output = model(data.view(-1, c, h, w)) # fuse batch size and ncrops
                 output = output.view(bs, ncrops, -1).mean(1)
-            elif mode == "max":
+            elif fivecrop == "max":
+                bs, ncrops, c, h, w = data.size()
+                output = model(data.view(-1, c, h, w)) # fuse batch size and ncrops
                 output = output.view(bs, ncrops, -1).max(1)[0]
             else:
-                raise Exception("mode should be mean or max")
+                output = model(data)
+            ## update the average validation loss
             loss = criterion(output, target)
             valid_loss += loss.item() * data.size(0)
     valid_loss = valid_loss / len(valid_loader.dataset) 
     return valid_loss
 
-def train(n_epochs, loaders, model, optimizer, criterion, device, path_model, fivecrop = False, mode = "mean", lr_scheduler = None):
+def train(n_epochs, loaders, model, optimizer, criterion, device, path_model, fivecrop = None, lr_scheduler = None):
     """Trains, validates, and saves the model and other data in a file"""
     # initialize tracker for minimum validation loss
     valid_loss_min = np.Inf 
@@ -157,10 +143,7 @@ def train(n_epochs, loaders, model, optimizer, criterion, device, path_model, fi
         model, train_loss_epoch = train_epoch(model,loaders["train"],optimizer,criterion,device)
         train_loss.append(train_loss_epoch)   
         # Validate this epoch
-        if fivecrop:
-            valid_loss_epoch = valid_epoch_fivecrop(model,loaders["valid"],criterion,device,mode)
-        else:
-            valid_loss_epoch = valid_epoch(model,loaders["valid"],criterion,device)
+        valid_loss_epoch = valid_epoch(model,loaders["valid"],criterion,device,fivecrop)
         # Call the learning rate scheduler if we have one
         if lr_scheduler is not None:
             lr_scheduler.step(valid_loss_epoch)
@@ -208,6 +191,31 @@ def try_learning_rates(learning_rates,file_names,image_folder,n_epochs,device):
                                                transform_test = transform_test, batch_size = 64, num_workers = 8)
         model = Net_Basic(n_classes, depth_1 = 32, fc_size = 512, p_dropout = 0.5, img_input_size = 224)
         train_save_load_model(model,"./learning_rates/" + file_names[i],loaders,learning_rates[i],n_epochs,device)
+        
+def try_learning_rates_bn(learning_rates,path_list,image_folder,n_epochs,device):
+    if len(learning_rates) != len(path_list):
+        raise Exception("learning rates and file paths have different number of elements")
+    for i in range(len(learning_rates)):
+        print(f"Trying learning rate {i+1}/{len(learning_rates)}: lr = {learning_rates[i]:.4f}")
+        transform_train = transforms.Compose([
+                            transforms.Resize(256),
+                            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomResizedCrop(224, scale=(0.08,1), ratio=(1,1)), 
+                            transforms.ToTensor(),
+                            transforms.Normalize(mean = norm_mean, std = norm_std)])
+        transform_test = transforms.Compose([
+                            transforms.Resize(256),  
+                            transforms.FiveCrop(224),
+                            transforms.Lambda(lambda crops: torch.stack([transforms.Compose([
+                        transforms.ToTensor(),transforms.Normalize(mean = norm_mean, std = norm_std)])(crop) for crop in crops]))])
+        # We need to decrease the batch size to keep the same memory requirements. This means testing will be about 5x slower.
+        data, loaders, n_classes = create_data(image_folder = image_folder, transform_train = transform_train,
+                                               transform_test = transform_test, 
+                                               batch_size = 64, num_workers = 8, fivecrop = True)
+        model = Net_BN(n_classes, depth_1 = 32)
+        train_save_load_model(model,path_list[i],loaders,learning_rates[i],n_epochs,device, 
+                              fivecrop = "mean", do_lr_scheduling = True)
 
 def load_model_data(path_model):
     model_data = torch.load(path_model)
@@ -216,7 +224,7 @@ def load_model_data(path_model):
     valid_loss = model_data["valid_loss"]
     return model, train_loss, valid_loss
 
-def train_save_load_model(model,path_model,loaders,lr,n_epochs,device, fivecrop = False, mode = "mean", do_lr_scheduling = False):
+def train_save_load_model(model,path_model,loaders,lr,n_epochs,device, fivecrop = None, do_lr_scheduling = False):
     if os.path.isfile(path_model):
         model, train_loss, valid_loss = load_model_data(path_model)
     else:
@@ -232,7 +240,7 @@ def train_save_load_model(model,path_model,loaders,lr,n_epochs,device, fivecrop 
             scheduler = None
         # Train
         train(n_epochs, loaders, model, optimizer, criterion, device, path_model, 
-              fivecrop = fivecrop, mode = mode, lr_scheduler = scheduler)
+              fivecrop = fivecrop, lr_scheduler = scheduler)
         model_data = torch.load(path_model)
         model = model_data["model"]
         train_loss = model_data["train_loss"]
@@ -293,31 +301,6 @@ def show_loss_many_models(path_list, model_names = None):
         ax[0].legend()
         ax[1].legend()
     plt.show()  
-    
-def try_learning_rates_bn(learning_rates,path_list,image_folder,n_epochs,device):
-    if len(learning_rates) != len(path_list):
-        raise Exception("learning rates and file paths have different number of elements")
-    for i in range(len(learning_rates)):
-        print(f"Trying learning rate {i+1}/{len(learning_rates)}: lr = {learning_rates[i]:.4f}")
-        transform_train = transforms.Compose([
-                            transforms.Resize(256),
-                            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                            transforms.RandomHorizontalFlip(),
-                            transforms.RandomResizedCrop(224, scale=(0.08,1), ratio=(1,1)), 
-                            transforms.ToTensor(),
-                            transforms.Normalize(mean = norm_mean, std = norm_std)])
-        transform_test = transforms.Compose([
-                            transforms.Resize(256),  
-                            transforms.FiveCrop(224),
-                            transforms.Lambda(lambda crops: torch.stack([transforms.Compose([
-                        transforms.ToTensor(),transforms.Normalize(mean = norm_mean, std = norm_std)])(crop) for crop in crops]))])
-        # We need to decrease the batch size to keep the same memory requirements. This means testing will be about 5x slower.
-        data, loaders, n_classes = create_data(image_folder = image_folder, transform_train = transform_train,
-                                               transform_test = transform_test, 
-                                               batch_size = 64, num_workers = 8, fivecrop = True)
-        model = Net_BN(n_classes, depth_1 = 32)
-        train_save_load_model(model,path_list[i],loaders,learning_rates[i],n_epochs,device, 
-                              fivecrop = True, mode = "mean", do_lr_scheduling = True)
 
 def test(loaders, model, criterion, device):
     # monitor test loss and accuracy
@@ -346,31 +329,33 @@ def test(loaders, model, criterion, device):
     print('\nTest Accuracy: %2d%% (%2d/%2d)' % (
         100. * correct / total, correct, total))
     
-def tempfun(model, loader, device):
+def show_test_batch(model, loader, data, device, n_batches):
     dataiter = iter(loader)
-    data, labels = dataiter.next()
-    data.numpy()
-    # move model inputs to cuda, if GPU available
-    data = data.to(device)
-    # get sample outputs
-    if len(data.shape) == 5:
-        bs, ncrops, c, h, w = data.size()
-        output = model(data.view(-1, c, h, w)).view(bs, ncrops, -1).mean(1) 
-    else:
-        output = model(data)
-    # convert output probabilities to predicted class
-    _, preds_tensor = torch.max(output, 1)
-    preds = np.squeeze(preds_tensor.cpu().numpy())
-    data = data.to("cpu")
-    # plot the images in the batch, along with predicted and true labels
-    fig = plt.figure(figsize=(25, 4))
-    for idx in np.arange(output.size(0)):
-        ax = fig.add_subplot(2, output.size(0)/2, idx+1, xticks=[], yticks=[])
-        print(data[idx].shape)
-        imshow(data[idx])
-        ax.set_title("{} ({})".format(loader.classes[preds[idx]], loader.classes[labels[idx]]),
-                     color=("green" if preds[idx]==labels[idx].item() else "red"))
-
+    for i in range(n_batches):
+        images, labels = dataiter.next()
+        images.numpy()
+        # move model inputs to cuda, if GPU available
+        images = images.to(device)
+        # get sample outputs
+        with torch.no_grad():
+            if len(images.shape) == 5:
+                bs, ncrops, c, h, w = images.size()
+                output = model(images.view(-1, c, h, w)).view(bs, ncrops, -1).mean(1) 
+            else:
+                output = model(data)
+        # convert output probabilities to predicted class
+        _, preds_tensor = torch.max(output, 1)
+        preds = np.squeeze(preds_tensor.cpu().numpy())
+        images = images.to("cpu")
+        # plot the images in the batch, along with predicted and true labels
+        fig = plt.figure(figsize=(25, 8))
+        for idx in np.arange(output.size(0)):
+            ax = fig.add_subplot(2, output.size(0)/2, idx+1, xticks=[], yticks=[])
+            imshow(images[idx][-1,:,:,:])
+            ax.set_title("{}\n({})".format(data.classes[preds[idx]], data.classes[labels[idx]]),
+                         color=("green" if preds[idx]==labels[idx].item() else "red"))
+        plt.show()
+        
 ############################################################################################################################################
 ########################################################### Model architectures ############################################################ 
 ############################################################################################################################################
