@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
 import matplotlib.pyplot as plt    
 from matplotlib.ticker import AutoMinorLocator
+from matplotlib.ticker import MaxNLocator
 
 # Let's use the normalization of ImageNet models so it's easier to compare
 norm_mean = [0.485, 0.456, 0.406]
@@ -69,6 +70,13 @@ def create_data(image_folder, transform_train, transform_test, batch_size = 64, 
     loaders = {"train" : train_loader, "valid" : valid_loader, "test" : test_loader}    
     
     return data, loaders, n_classes
+
+def get_samples_per_class(data):
+    # Too slow for any practical purposes. Leaving it for a future commit
+    samples_per_class = np.zeros(len(data.classes))
+    for _, label in data:
+        samples_per_class[label] += 1   
+    return samples_per_class
 
 def train_epoch(model,train_loader,optimizer,criterion,device):
     train_loss = 0.0
@@ -184,7 +192,7 @@ def try_learning_rates(learning_rates,file_names,image_folder,n_epochs,device):
     if len(learning_rates) != len(file_names):
         raise Exception("learning rates and file paths have different number of elements")
     for i in range(len(learning_rates)):
-        print(f"Trying learning rate {i+1}/{len(learning_rates)}: lr = {learning_rates[i]:.4f}")
+        print(f"Trying / loading learning rate {i+1}/{len(learning_rates)}: lr = {learning_rates[i]:.4f}")
         transform_train = transforms.Compose([
                             transforms.Resize((256,256)),
                             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
@@ -259,6 +267,7 @@ def show_loss_one_model(train_loss, valid_loss, title = None):
     plt.minorticks_on()
     if title is not None:
         plt.title(title)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.show()    
 
 def show_loss_many_models(path_list, model_names = None):
@@ -309,33 +318,59 @@ def try_learning_rates_bn(learning_rates,path_list,image_folder,n_epochs,device)
         model = Net_BN(n_classes, depth_1 = 32)
         train_save_load_model(model,path_list[i],loaders,learning_rates[i],n_epochs,device, 
                               fivecrop = True, mode = "mean", do_lr_scheduling = True)
-        
 
+def test(loaders, model, criterion, device):
+    # monitor test loss and accuracy
+    test_loss = 0.
+    correct = 0.
+    total = 0.
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, (data, target) in enumerate(loaders['test']):
+            # move to GPU
+            data, target = data.to(device), target.to(device)
+            bs, ncrops, c, h, w = data.size()
+            # forward pass: compute predicted outputs by passing inputs to the model
+            output = model(data.view(-1, c, h, w)) # fuse batch size and ncrops
+            output = output.view(bs, ncrops, -1).mean(1)        
+            # calculate the loss
+            loss = criterion(output, target)
+            # update average test loss 
+            test_loss = test_loss + ((1 / (batch_idx + 1)) * (loss.data - test_loss))
+            # convert output probabilities to predicted class
+            pred = output.data.max(1, keepdim=True)[1]
+            # compare predictions to true label
+            correct += np.sum(np.squeeze(pred.eq(target.data.view_as(pred))).cpu().numpy())
+            total += data.size(0)            
+    print('Test Loss: {:.6f}\n'.format(test_loss))
+    print('\nTest Accuracy: %2d%% (%2d/%2d)' % (
+        100. * correct / total, correct, total))
+    
+def tempfun(model, loader, device):
+    dataiter = iter(loader)
+    data, labels = dataiter.next()
+    data.numpy()
+    # move model inputs to cuda, if GPU available
+    data = data.to(device)
+    # get sample outputs
+    if len(data.shape) == 5:
+        bs, ncrops, c, h, w = data.size()
+        output = model(data.view(-1, c, h, w)).view(bs, ncrops, -1).mean(1) 
+    else:
+        output = model(data)
+    # convert output probabilities to predicted class
+    _, preds_tensor = torch.max(output, 1)
+    preds = np.squeeze(preds_tensor.cpu().numpy())
+    data = data.to("cpu")
+    # plot the images in the batch, along with predicted and true labels
+    fig = plt.figure(figsize=(25, 4))
+    for idx in np.arange(output.size(0)):
+        ax = fig.add_subplot(2, output.size(0)/2, idx+1, xticks=[], yticks=[])
+        print(data[idx].shape)
+        imshow(data[idx])
+        ax.set_title("{} ({})".format(loader.classes[preds[idx]], loader.classes[labels[idx]]),
+                     color=("green" if preds[idx]==labels[idx].item() else "red"))
 
-
-# def valid_epoch_fivecrop(model,valid_loader,criterion,device,mode="mean"):
-#     ######################    
-#     # validate the model #
-#     ######################
-#     valid_loss = 0.0
-#     model.eval()
-#     with torch.no_grad():
-#         for data, target in valid_loader:
-#             # move to GPU
-#             data, target = data.to(device), target.to(device)
-#             bs, ncrops, c, h, w = data.size()
-#             ## update the average validation loss
-#             output = model(data.view(-1, c, h, w)) # fuse batch size and ncrops
-#             if mode == "mean":
-#                 output = output.view(bs, ncrops, -1).mean(1)
-#             elif mode == "max":
-#                 output = output.view(bs, ncrops, -1).max(1)[0]
-#             else:
-#                 raise Exception("mode should be mean or max")
-#             loss = criterion(output, target)
-#             valid_loss += loss.item() * data.size(0)
-#     valid_loss = valid_loss / len(valid_loader.dataset) 
-#     return valid_loss
 ############################################################################################################################################
 ########################################################### Model architectures ############################################################ 
 ############################################################################################################################################
@@ -623,69 +658,6 @@ class Net_BN_Res(nn.Module,):
         self.bn2_2 = nn.BatchNorm2d(depth_2)    
         # Conversion from depth_2 to depth_3
         self.conv1x1_3 = nn.Conv2d(depth_2,depth_3,1,stride = 1,padding = 0)        
-        # Conv set 3
-        self.conv3_1 = nn.Conv2d(depth_3,depth_3,3,stride = 1,padding = 1)
-        self.conv3_2 = nn.Conv2d(depth_3,depth_3,3,stride = 1,padding = 1)
-        self.bn3_1 = nn.BatchNorm2d(depth_3)
-        self.bn3_2 = nn.BatchNorm2d(depth_3)
-        # Output
-        self.fc_out = nn.Linear(depth_3,n_classes)   
-        # Initialize weights
-        nn.init.kaiming_normal_(self.conv1_1.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.conv1_2.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.conv2_1.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.conv2_2.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.conv3_1.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.conv3_2.weight, nonlinearity='relu') 
-            
-    def forward(self, x):
-        # Conv 1
-        x = F.relu(self.bn1_1(self.conv1_1(x)))
-        x = F.relu(self.bn1_2(self.conv1_2(x)))
-        x = self.pool(x)
-        out = self.conv1x1_2(x)
-        # Conv 2
-        x = F.relu(self.bn2_1(self.conv2_1(out)))
-        x = self.bn2_2(self.conv2_2(x))
-        x = F.relu(x + out)
-        x = self.pool(x)        
-        out = self.conv1x1_3(x)
-        # Conv 3
-        x = F.relu(self.bn3_1(self.conv3_1(out)))
-        x = self.bn3_2(self.conv3_2(x))
-        x = F.relu(x + out)
-        x = self.pool(x)
-        # First we fuse the height and width dimensions (2 and 3) 
-        x = x.view(x.size(0),x.size(1),-1)        
-        # And now max global pooling
-        x = x.max(2)[0]
-        # Output
-        x = self.fc_out(x)
-        return x
-
-# CNN + Batchnorm + Residual connections variant 2
-class Net_BN_Res_2(nn.Module,):
-    def __init__(self, n_classes, depth_1 = 32):
-        super(Net_BN_Res_2, self).__init__()        
-        # Keep track of things
-        depth_2 = depth_1 * 2
-        depth_3 = depth_2 * 2      
-        # Max pooling layer
-        self.pool = nn.MaxPool2d(2,2)
-        # Conv set 1
-        self.conv1_1 = nn.Conv2d(3,depth_1,3,stride = 1,padding = 1)
-        self.conv1_2 = nn.Conv2d(depth_1,depth_1,3,stride = 1,padding = 1)
-        self.bn1_1 = nn.BatchNorm2d(depth_1)
-        self.bn1_2 = nn.BatchNorm2d(depth_1)
-        # Conversion from depth_1 to depth_2
-        self.conv1x1_2 = nn.Conv2d(depth_1,depth_2,3,stride = 1,padding = 1)
-        # Conv set 2
-        self.conv2_1 = nn.Conv2d(depth_2,depth_2,3,stride = 1,padding = 1)
-        self.conv2_2 = nn.Conv2d(depth_2,depth_2,3,stride = 1,padding = 1)
-        self.bn2_1 = nn.BatchNorm2d(depth_2)
-        self.bn2_2 = nn.BatchNorm2d(depth_2)    
-        # Conversion from depth_2 to depth_3
-        self.conv1x1_3 = nn.Conv2d(depth_2,depth_3,3,stride = 1,padding = 1)   
         # Conv set 3
         self.conv3_1 = nn.Conv2d(depth_3,depth_3,3,stride = 1,padding = 1)
         self.conv3_2 = nn.Conv2d(depth_3,depth_3,3,stride = 1,padding = 1)
