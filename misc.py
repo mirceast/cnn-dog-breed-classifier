@@ -65,9 +65,9 @@ def create_data(image_folder, transform_train, transform_test, batch_size = 64, 
         num_workers = 0
         batch_size = int(np.floor(batch_size/5))
     valid_loader = torch.utils.data.DataLoader(data["valid"], batch_size=batch_size, 
-                                               num_workers=0, shuffle=shuffle, pin_memory=True)
+                                               num_workers=num_workers, shuffle=shuffle, pin_memory=True)
     test_loader = torch.utils.data.DataLoader(data["test"], batch_size=batch_size, 
-                                              num_workers=0, shuffle=shuffle, pin_memory=True)
+                                              num_workers=num_workers, shuffle=shuffle, pin_memory=True)
     loaders = {"train" : train_loader, "valid" : valid_loader, "test" : test_loader}        
     return data, loaders, n_classes
 
