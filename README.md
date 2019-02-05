@@ -21,5 +21,5 @@ The repository consists of the following three main files:
 - **fix_truncated_images.ipynb**: One of the training images is truncated. More info and fix in this notebook. 
     
 # Usage
-The easiest way to run everything is to create an environment from `Requirements.txt` with the command:
+The easiest way to run everything is to create an environment from `Requirements.txt` with the command:<br>
 `conda create -n <environment_name_here> --file Requirements.txt`
