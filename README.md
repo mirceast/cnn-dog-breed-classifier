@@ -1,5 +1,5 @@
 # cnn-dog-breed-classifier
-PyTorch implementation of a dog breed classifier using convolutional neural nets. Part of Udacity's Deep Learning Nanodegree program. 
+PyTorch implementation of a dog breed classifier using convolutional neural nets. Part of __[Udacity's Deep Learning Nanodegree program](https://eu.udacity.com/course/deep-learning-nanodegree--nd101?gclid=Cj0KCQiAheXiBRD-ARIsAODSpWMPNTRMr6ecpZ3sUWoLF5I45JYfwFsngcOqfJFUxYT_TnvSsXaecCMaAuFfEALw_wcB)__. 
 
 The dataset contains 8352 images in total, divided across 133 breeds. On average, there are 50 images per breed, with a minimum of 26 for the Norwegian buhund and a maximum of 77 for the Alaskan malamute.
 
