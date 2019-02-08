@@ -4,7 +4,7 @@
 backcall=0.1.0=py37_0
 blas=1.0=mkl
 bleach=3.1.0=py37_0
-ca-certificates=2018.12.5=0
+ca-certificates=2019.1.23=0
 certifi=2018.11.29=py37_0
 cffi=1.11.5=py37h74b6da3_1
 colorama=0.4.1=py37_0
@@ -13,6 +13,7 @@ cycler=0.10.0=py37_0
 decorator=4.3.0=py37_0
 entrypoints=0.3=py37_0
 freetype=2.9.1=ha9979f8_1
+h5py=2.8.0=py37hf7173ca_2
 hdf5=1.8.20=hac2f561_1
 icc_rt=2019.0.0=h0cc432a_1
 icu=58.2=ha66f8fd_1
